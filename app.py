@@ -7,7 +7,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Lola & Co Tronc App", layout="wide")
 
-EXCLUDE_FIRST_NAMES = {"quim", "marc", "josep", "pep"}
+EXCLUDE_FIRST_NAMES = {"quim", "marc", "josep"}
 WINDOW_START_HOUR = 12
 WINDOW_END_HOUR = 23
 APP_DIR = Path(__file__).parent
