@@ -1,131 +1,3 @@
-
-import io
-import calendar
-from pathlib import Path
-import pandas as pd
-import streamlit as st
-
-st.set_page_config(page_title="Lola & Co Tronc App", layout="wide")
-
-EXCLUDE_FIRST_NAMES = {"quim", "marc", "josep"}
-WINDOW_START_HOUR = 12
-WINDOW_END_HOUR = 23
-APP_DIR = Path(__file__).parent
-DATA_DIR = APP_DIR / "data"
-TIPS_FILE = DATA_DIR / "daily_tips.csv"
-
-st.title("Lola & Co Tronc Calculator")
-st.caption("12:00–23:00 only • Breaks deducted • TOTAL row tips only • Daily rate calculation")
-
-st.markdown(
-    """
-    <style>
-    @media (max-width: 700px) {
-        .stButton > button, .stDownloadButton > button {
-            width: 100%;
-            min-height: 3rem;
-        }
-        [data-testid="stMetricValue"] {
-            font-size: 1.6rem;
-        }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-def month_dates(month_start):
-    start = pd.Timestamp(month_start).normalize()
-    days_in_month = calendar.monthrange(start.year, start.month)[1]
-    return pd.date_range(start, periods=days_in_month)
-
-def load_saved_tips():
-    if not TIPS_FILE.exists():
-        return pd.DataFrame(columns=["date", "tips"])
-
-    saved = pd.read_csv(TIPS_FILE)
-    if saved.empty:
-        return pd.DataFrame(columns=["date", "tips"])
-
-    saved["date"] = pd.to_datetime(saved["date"], errors="coerce")
-    saved["tips"] = pd.to_numeric(saved["tips"], errors="coerce").fillna(0)
-    saved = saved.dropna(subset=["date"])
-    saved["date"] = saved["date"].dt.normalize()
-    saved = saved.groupby("date", as_index=False)["tips"].last()
-    return saved.sort_values("date")
-
-def save_tips(tips):
-    DATA_DIR.mkdir(exist_ok=True)
-    tips = tips.copy()
-    tips["date"] = pd.to_datetime(tips["date"], errors="coerce")
-    tips["tips"] = pd.to_numeric(tips["tips"], errors="coerce").fillna(0)
-    tips = tips.dropna(subset=["date"])
-    tips["date"] = tips["date"].dt.normalize()
-    tips = tips.groupby("date", as_index=False)["tips"].last().sort_values("date")
-    tips.to_csv(TIPS_FILE, index=False, date_format="%Y-%m-%d")
-
-def save_daily_tip(entry_date, amount):
-    saved = load_saved_tips()
-    entry = pd.DataFrame({"date": [pd.Timestamp(entry_date).normalize()], "tips": [float(amount or 0)]})
-    save_tips(pd.concat([saved, entry], ignore_index=True))
-
-def tips_for_month(month_start):
-    days = month_dates(month_start)
-    default_tips = pd.DataFrame({"date": days, "tips": [0.0] * len(days)})
-    saved = load_saved_tips()
-
-    if saved.empty:
-        return default_tips
-
-    return default_tips.drop(columns=["tips"]).merge(saved, on="date", how="left").fillna({"tips": 0.0})
-
-def overlap_hours(a_start, a_end, b_start, b_end):
-    return max(0, (min(a_end, b_end) - max(a_start, b_start)).total_seconds() / 3600)
-
-def load_blip(file):
-    ts = pd.read_excel(file, header=1)
-    ts = ts.iloc[:, :14]
-    ts.columns = [
-        "First Name","Last Name","Job Title","Team","Blip Type",
-        "Clock In Date","Clock In Time","Clock In Location",
-        "Clock Out Date","Clock Out Time","Clock Out Location",
-        "Total Duration","Total Excl Breaks","Notes"
-    ]
-    return ts
-
-def calculate(ts, tips, manual):
-    shifts = ts[(ts["Blip Type"] == "Shift") & (~ts["First Name"].astype(str).str.lower().isin(EXCLUDE_FIRST_NAMES))].copy()
-    breaks = ts[(ts["Blip Type"] == "Break") & (~ts["First Name"].astype(str).str.lower().isin(EXCLUDE_FIRST_NAMES))].copy()
-
-    for df in (shifts, breaks):
-        df["start"] = pd.to_datetime(df["Clock In Date"].astype(str) + " " + df["Clock In Time"].astype(str), errors="coerce")
-        df["end"] = pd.to_datetime(df["Clock Out Date"].astype(str) + " " + df["Clock Out Time"].astype(str), errors="coerce")
-
-    shifts = shifts.dropna(subset=["start", "end"])
-    breaks = breaks.dropna(subset=["start", "end"])
-
-    records = []
-    for (date, first, last), grp in shifts.groupby([shifts["start"].dt.date, "First Name", "Last Name"]):
-        eligible = 0.0
-        person_breaks = breaks[(breaks["First Name"] == first) & (breaks["Last Name"] == last)]
-
-        for _, r in grp.iterrows():
-            day = pd.Timestamp(date)
-            ws = day + pd.Timedelta(hours=WINDOW_START_HOUR)
-            we = day + pd.Timedelta(hours=WINDOW_END_HOUR)
-
-            s = max(r["start"], ws)
-            e = min(r["end"], we)
-            if e <= s:
-                continue
-
-            duration = (e - s).total_seconds() / 3600
-
-            for _, b in person_breaks.iterrows():
-                duration -= overlap_hours(s, e, b["start"], b["end"])
-
-            eligible += max(0, duration)
-
         full_hours = pd.to_timedelta(grp["Total Excl Breaks"], errors="coerce").dt.total_seconds().fillna(0).sum() / 3600
         records.append([pd.Timestamp(date), first, last, eligible, full_hours])
 
@@ -192,7 +64,38 @@ with st.sidebar:
     st.write("Breaks: deducted")
     st.write("Tips: TOTAL rows only")
 
-daily_tab, monthly_tab = st.tabs(["Daily tips", "Monthly payroll"])
+dashboard_tab, daily_tab, monthly_tab = st.tabs(["Dashboard", "Daily tips", "Monthly payroll"])
+
+with dashboard_tab:
+    st.subheader("Dashboard")
+
+    dashboard_month = st.date_input(
+        "Dashboard month",
+        value=pd.Timestamp.today().date(),
+        key="dashboard_month",
+    )
+    summary = monthly_tip_summary(dashboard_month)
+    month_tips = summary["month_tips"]
+
+    c1, c2 = st.columns(2)
+    c1.metric("This Month", f"£{summary['total']:,.2f}")
+    c2.metric("Today", f"£{summary['today_tips']:,.2f}")
+
+    c3, c4 = st.columns(2)
+    c3.metric("Days Recorded", f"{summary['days_recorded']}/{len(month_tips)}")
+    c4.metric("Average Day", f"£{summary['average']:,.2f}")
+
+    st.caption(f"Best day: {summary['best_day']}")
+
+    chart_data = month_tips.set_index("date")["tips"]
+    st.bar_chart(chart_data)
+
+    recent_tips = load_saved_tips().sort_values("date", ascending=False).head(7)
+    st.subheader("Recent Entries")
+    if recent_tips.empty:
+        st.info("No saved daily tips yet.")
+    else:
+        st.dataframe(recent_tips, width="stretch", hide_index=True)
 
 with daily_tab:
     st.subheader("Daily TOTAL tips")
